@@ -1,0 +1,341 @@
+---
+title: "Tryout"
+author: "Shengtao Wang"
+---
+
+```{r setup, include=FALSE}
+library(survival)
+library(MiRKAT)
+library(tidyverse)
+library(LDM)
+library(coxphf)
+library(ggpubr)
+
+data("throat.otu.tab")
+data("throat.meta")
+data("throat.tree")
+```
+
+```{r}
+lib.size = rowSums(throat.otu.tab)
+event = as.data.frame(throat.otu.tab > 0)*1   # 0 - below detection limit - "censored/alive" - event = 0 (FALSE)
+tab = -log((throat.otu.tab + !event)/lib.size)
+
+tab$id = row.names(tab)
+event$id = row.names(event)
+throat.meta$id = row.names(throat.meta)
+
+tab.long = pivot_longer(tab, cols = -id, names_to = 'OTU', values_to = 'abundance')
+event.long = pivot_longer(event, cols = -id, names_to = 'OTU', values_to = 'event')
+
+abundance_event = left_join(tab.long, event.long, by = c('id', 'OTU'))
+data.long = left_join(abundance_event, throat.meta[,c('id', 'SmokingStatus')], by = 'id')
+
+OTU = colnames(throat.otu.tab)
+```
+
+# 1. Coxph
+
+```{r}
+fit.coxph = vector()
+for (i in 1:length(OTU)){
+    data.fit = data.long[data.long$OTU == OTU[i],]
+    fit = coxph(Surv(time = abundance, event = event)~SmokingStatus, data = data.fit)
+    
+    fit.coxph = rbind(fit.coxph, summary(fit)$coefficients[,c(1, 3, 5)])
+}
+
+colnames(fit.coxph) = c('Estimates', 'SE', 'p')
+```
+
+# 2. Coxphf
+
+```{r}
+fit.coxphf = vector()
+
+for (i in 1:length(OTU)){
+    data.fit = data.long[data.long$OTU == OTU[i],]
+    fit = coxphf(Surv(time = abundance, event = event)~SmokingStatus, data = data.fit, pl = FALSE)
+    
+    fit.coxphf = rbind(fit.coxphf, c(fit$coefficients, fit$var^0.5, fit$prob))
+}
+
+colnames(fit.coxphf) = c('Estimates', 'SE', 'p')
+```
+
+```{r}
+Filter = abs(fit.coxph[,1]) <= 5
+
+p = data.frame(coxph = fit.coxph[Filter,3], coxphf = fit.coxphf[Filter,3]) %>%
+    ggplot() +
+    geom_point(aes(x = -log(coxph, base = 10), y = -log(coxphf, base = 10))) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red') +
+    labs(title = 'p-values')
+
+est = data.frame(coxph = fit.coxph[Filter,1], coxphf = fit.coxphf[Filter,1]) %>%
+    ggplot() +
+    geom_point(aes(x = coxph, y = coxphf)) +
+    labs(title = 'Estimates')
+
+ggarrange(p, est, ncol = 2)
+```
+
+# 3. Coxphf Permutation
+
+## Timing
+
+```{r}
+Round = 100
+num.subject = dim(throat.meta)[1]
+num.OTU = length(OTU)
+
+perm.matrix = matrix(nrow = Round, ncol = num.OTU)
+colnames(perm.matrix) = OTU
+
+data.permute = throat.meta[,c('id', 'SmokingStatus')]
+time.permute = rep(NA, Round)
+
+t.start = Sys.time()
+
+for (i in 1:Round){
+    
+    data.permute$SmokingStatus = sample(data.permute$SmokingStatus, num.subject, replace = FALSE)
+    data.permuted = left_join(abundance_event, data.permute, by = 'id')
+    
+    
+    fit.permuted = rep(NA, num.OTU)
+    fit.time = rep(NA, num.OTU)
+    
+    for (j in 1:num.OTU){
+        data.fit = data.permuted[data.permuted$OTU == OTU[j],]
+        t0.fit = Sys.time()
+        fit = coxphf(Surv(time = abundance, event = event)~SmokingStatus, data = data.fit, pl = FALSE)
+        t1.fit = Sys.time()
+        fit.permuted[j] = fit$coefficients
+        fit.time[j] = t1.fit - t0.fit
+    }
+    
+    perm.matrix[i,] = fit.permuted
+    time.permute[i] = sum(fit.time)
+}
+
+t.end = Sys.time()
+
+t.end-t.start
+sum(time.permute)
+
+# Total Time: 172.76s
+# Fit Time: 148.83s
+```
+
+```{r}
+Round = 1000
+num.subject = dim(throat.meta)[1]
+num.OTU = length(OTU)
+
+data.permute = throat.meta[,c('id', 'SmokingStatus')]
+
+K = 30
+for (k in 1:K){ # This is to separate rounds of permutations
+    
+    perm.matrix = matrix(nrow = Round, ncol = num.OTU)
+    colnames(perm.matrix) = OTU
+    
+    for (i in 1:Round){
+        
+        data.permute$SmokingStatus = sample(data.permute$SmokingStatus, num.subject, replace = FALSE)
+        data.permuted = left_join(abundance_event, data.permute, by = 'id')
+        
+        fit.permuted = rep(NA, num.OTU)
+        
+        for (j in 1:num.OTU){
+            data.fit = data.permuted[data.permuted$OTU == OTU[j],]
+            fit = coxphf(Surv(time = abundance, event = event)~SmokingStatus, data = data.fit, pl = FALSE)
+            fit.permuted[j] = fit$coefficients
+        }
+        
+        perm.matrix[i,] = fit.permuted
+    }
+    
+    write.csv(perm.matrix, paste('./Permutations/Permutation_', k, '.csv', sep = ''))
+    
+}
+```
+
+```{r}
+Permutations = as.data.frame(matrix(NA, ncol = num.OTU, nrow = Round*K))
+colnames(Permutations) = OTU
+
+for (k in 1:K){
+    
+    Permutations[(1:Round)+(k-1)*Round,] = read.csv(paste('./Permutations/Permutation_', k, '.csv', sep = ''))[,-1]
+    
+}
+```
+
+# 4. LDM
+
+```{r}
+ldmfit = ldm(throat.otu.tab~factor(SmokingStatus), data = throat.meta)
+```
+
+# 5. Results
+
+```{r}
+hist(Permutations[,1])
+hist(Permutations[,5])
+hist(Permutations[,13])
+```
+
+```{r}
+p.perms = rep(NA, num.OTU)
+
+#for (i in 1:length(OTU)){
+#    p.perm = c(p.perm, (sum(abs(perm.matrix[,i]) >= abs(fit.coxphf[i,1])) + 1) / (Round + 1))
+#}
+
+for (i in 1:num.OTU){
+    
+    p.perm = sum(Permutations[,i] >= fit.coxphf[i,1])
+    p.perm = min(p.perm, Round*K - p.perm)
+    p.perm = 2*(p.perm+1)/(Round*K+1)
+    
+    p.perms[i] = p.perm
+}
+
+hist(p.perms)
+plot(x=-log((1:856)/856,10),-log(sort(p.perms),10));abline(0,1)
+```
+
+```{r}
+p.coxphf = fit.coxphf[,3]
+p.LDM = ldmfit$p.otu.freq[1,]
+
+q.perm = p.adjust(p.perms, 'fdr')
+q.coxphf = p.adjust(p.coxphf, 'fdr')
+q.LDM = ldmfit$q.otu.freq[1,]
+
+result.p = data.frame(OTU = OTU, coxphf = p.coxphf, LDM = p.LDM, perm = p.perms)
+result.q = data.frame(OTU = OTU, coxphf = q.coxphf, LDM = q.LDM, perm = q.perm)
+
+cutoff = 0.1
+
+table('perm'=(result.p$perm < cutoff), 'LDM'=(result.p$LDM < cutoff))
+table('perm'=(result.q$perm < cutoff), 'LDM'=(result.q$LDM < cutoff))
+```
+
+```{r}
+result.q %>% ggplot() +
+    geom_point(aes(x = OTU, y = LDM, color = 'LDM'), alpha = 0.5) + 
+    geom_point(aes(x = OTU, y = coxphf, color = 'coxphf'), alpha = 0.5) + 
+    geom_point(aes(x = OTU, y = perm, color = 'perm'), alpha = 0.5) +
+    geom_abline(intercept = 0.1, slope = 0, color = 'red', linetype = 'dashed', lwd = 1) +
+    labs(y = 'q values', color = 'Model', title = 'q-values') +
+    scale_x_discrete(breaks = c()) +
+    scale_y_continuous(breaks = seq(0,1,0.1)) +
+    scale_color_manual(values = c('LDM' = '#3b5dc9', 'coxphf' = '#1bd1a5', 'perm' = '#ff7500'))
+```
+
+```{r}
+result.p %>% ggplot() +
+    geom_point(aes(x = OTU, y = LDM, color = 'LDM'), alpha = 0.5) + 
+    geom_point(aes(x = OTU, y = coxphf, color = 'coxphf'), alpha = 0.5) + 
+    geom_point(aes(x = OTU, y = perm, color = 'perm'), alpha = 0.5) +
+    geom_abline(intercept = 0.1, slope = 0, color = 'red', linetype = 'dashed', lwd = 1) +
+    labs(y = 'p values', color = 'Model', title = 'p-values') +
+    scale_x_discrete(breaks = c()) +
+    scale_y_continuous(breaks = seq(0,1,0.1)) +
+    scale_color_manual(values = c('LDM' = '#3b5dc9', 'coxphf' = '#1bd1a5', 'perm' = '#ff7500'))
+```
+
+```{r}
+ggplot(result.p) +
+    geom_point(aes(x = perm, y = LDM), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed') +
+    labs(x = 'Permutation', y = 'LDM', title = 'p values')
+```
+
+```{r}
+ggplot(result.p) +
+    geom_point(aes(x = perm, y = coxphf), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed') +
+    labs(x = 'Permutation', y = 'Coxphf', title = 'p values')
+```
+
+```{r fig.height=9, fig.width=6}
+p.LDM2perm =  ggplot(result.p) +
+    geom_point(aes(x = perm, y = LDM), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed') +
+    scale_x_continuous(limits = c(0,1), breaks = seq(0,1,0.2)) +
+    scale_y_continuous(limits = c(0,1), breaks = seq(0,1,0.2))
+
+p.LDM2perm.log =  ggplot(result.p) +
+    geom_point(aes(x = -log(perm, 10), y = -log(LDM, 10)), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed')
+
+p.coxphf2perm =  ggplot(result.p) +
+    geom_point(aes(x = perm, y = coxphf), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed') +
+    scale_x_continuous(limits = c(0,1), breaks = seq(0,1,0.2)) +
+    scale_y_continuous(limits = c(0,1), breaks = seq(0,1,0.2))
+
+p.coxphf2perm.log =  ggplot(result.p) +
+    geom_point(aes(x = -log(perm, 10), y = -log(coxphf, 10)), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed')
+
+p.LDM2coxphf =  ggplot(result.p) +
+    geom_point(aes(x = coxphf, y = LDM), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed') +
+    scale_x_continuous(limits = c(0,1), breaks = seq(0,1,0.2)) +
+    scale_y_continuous(limits = c(0,1), breaks = seq(0,1,0.2))
+
+p.LDM2coxphf.log =  ggplot(result.p) +
+    geom_point(aes(x = -log(coxphf, 10), y = -log(LDM, 10)), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed')
+
+ggarrange(p.LDM2perm, p.LDM2perm.log, p.LDM2coxphf, p.LDM2coxphf.log, p.coxphf2perm, p.coxphf2perm.log, ncol = 2, nrow = 3)
+```
+
+```{r fig.height=9, fig.width=6}
+q.LDM2perm = ggplot(result.q) +
+    geom_point(aes(x = perm, y = LDM), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed') +
+    scale_x_continuous(limits = c(0,1), breaks = seq(0,1,0.2)) +
+    scale_y_continuous(limits = c(0,1), breaks = seq(0,1,0.2))
+
+q.LDM2perm.log = ggplot(result.q) +
+    geom_point(aes(x = -log(perm, 10), y = -log(LDM, 10)), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed')
+
+q.coxphf2perm = ggplot(result.q) +
+    geom_point(aes(x = perm, y = coxphf), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed') +
+    scale_x_continuous(limits = c(0,1), breaks = seq(0,1,0.2)) +
+    scale_y_continuous(limits = c(0,1), breaks = seq(0,1,0.2))
+    
+q.coxphf2perm.log = ggplot(result.q) +
+    geom_point(aes(x = -log(perm, 10), y = -log(coxphf, 10)), size = 1) + 
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed')
+
+q.LDM2coxphf = ggplot(result.q) +
+    geom_point(aes(x = coxphf, y = LDM), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed') +
+    scale_x_continuous(limits = c(0,1), breaks = seq(0,1,0.2)) +
+    scale_y_continuous(limits = c(0,1), breaks = seq(0,1,0.2))
+
+q.LDM2coxphf.log = ggplot(result.q) +
+    geom_point(aes(x = -log(coxphf, 10), y = -log(LDM, 10)), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed')
+
+ggarrange(q.LDM2perm, q.LDM2perm.log, q.LDM2coxphf, q.LDM2coxphf.log, q.coxphf2perm, q.coxphf2perm.log, ncol = 2, nrow = 3)
+```
+
+
+
+
+
+
+
+
+
+
