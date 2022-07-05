@@ -179,9 +179,10 @@ permutation.coxphf = function(Round = 100){
     return(perm.matrix)
 }
 
-K = 20
+K = 30
+Round = 1000
 for (k in 1:K){
-    perm.matrix = permutation.coxphf(1000)
+    perm.matrix = permutation.coxphf(Round)
     write.csv(perm.matrix, paste('D:/Default_Working_Directory/Permutations/Permutation_', k, '.csv', sep = ''))
 }
 ```
@@ -198,29 +199,25 @@ for (k in 1:K){
 ```
 
 ```{r}
-p.perms = rep(NA, num.OTU)
+p.perms = rep(NA, num.otu)
 
-#for (i in 1:length(OTU)){
-#    p.perm = c(p.perm, (sum(abs(perm.matrix[,i]) >= abs(fit.coxphf[i,1])) + 1) / (Round + 1))
-#}
-
-for (i in 1:num.OTU){
+for (i in 1:num.otu){
     
     p.perm = sum(Permutations[,i] >= fit.coxphf[i,1])
-    p.perm = min(p.perm, Round*K - p.perm)
-    p.perm = 2*(p.perm+1)/(Round*K+1)
+    p.perm = min(p.perm, nrow(Permutations) - p.perm)
+    p.perm = 2*(p.perm+1)/(nrow(Permutations)+1)
     
     p.perms[i] = p.perm
 }
 
 hist(p.perms)
-plot(x=-log((1:856)/856,10),-log(sort(p.perms),10));abline(0,1)
+plot(x=-log((1:num.otu)/num.otu,10),-log(sort(p.perms),10));abline(0,1)
 ```
 
 # 5. LDM
 
 ```{r}
-ldmfit = ldm(throat.otu.tab~factor(SmokingStatus), data = throat.meta)
+ldmfit = ldm(MOUTH.otu~factor(MOUTH.meta$Oral_SPF10))
 ```
 
 # 6. Results
@@ -229,12 +226,12 @@ ldmfit = ldm(throat.otu.tab~factor(SmokingStatus), data = throat.meta)
 p.coxphf = fit.coxphf[,3]
 p.LDM = ldmfit$p.otu.freq[1,]
 
-q.perm = p.adjust(p.perms, 'fdr')
+q.perms = p.adjust(p.perms, 'fdr')
 q.coxphf = p.adjust(p.coxphf, 'fdr')
 q.LDM = ldmfit$q.otu.freq[1,]
 
-result.p = data.frame(OTU = OTU, coxphf = p.coxphf, LDM = p.LDM, perm = p.perms)
-result.q = data.frame(OTU = OTU, coxphf = q.coxphf, LDM = q.LDM, perm = q.perm)
+result.p = data.frame(OTU = otus50, coxphf = p.coxphf, LDM = p.LDM, perm = p.perms)
+result.q = data.frame(OTU = otus50, coxphf = q.coxphf, LDM = q.LDM, perm = q.perms)
 
 cutoff = 0.1
 
@@ -346,24 +343,6 @@ q.LDM2coxphf.log = ggplot(result.q) +
     geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed')
 
 ggarrange(q.LDM2perm, q.LDM2perm.log, q.LDM2coxphf, q.LDM2coxphf.log, q.coxphf2perm, q.coxphf2perm.log, ncol = 2, nrow = 3)
-```
-
-
-```{r}
-Filter = abs(fit.coxph[,1]) <= 5
-
-p = data.frame(coxph = fit.coxph[Filter,3], coxphf = fit.coxphf[Filter,3]) %>%
-    ggplot() +
-    geom_point(aes(x = -log(coxph, base = 10), y = -log(coxphf, base = 10))) +
-    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red') +
-    labs(title = 'p-values')
-
-est = data.frame(coxph = fit.coxph[Filter,1], coxphf = fit.coxphf[Filter,1]) %>%
-    ggplot() +
-    geom_point(aes(x = coxph, y = coxphf)) +
-    labs(title = 'Estimates')
-
-ggarrange(p, est, ncol = 2)
 ```
 
 
