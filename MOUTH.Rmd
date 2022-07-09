@@ -9,13 +9,13 @@ library(survival)
 library(tidyverse)
 library(LDM)
 library(coxphf)
-library(ggpubr)
 ```
 
 # 1. Data Processing
 
 ```{r}
-data = import_biom('D:/Default_Working_Directory/Data/MOUTH/converted_otu.biom')
+data.path = 'D:/Default_Working_Directory/Data/MOUTH/converted_otu.biom'
+data = import_biom(data.path)
 MOUTH.meta = read.csv('D:/Default_Working_Directory/Data/MOUTH/mouth_metadata_sept2020.csv')
 MOUTH.otu = as.data.frame(t(data@otu_table))
 
@@ -59,11 +59,11 @@ load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.abundance_filtered.rData')
 load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.event_filtered.rData')
 
 sum.events = colSums(MOUTH.event[,-28265])  # The last column is id
-otus50 = colnames(MOUTH.event[,-28265])[sum.events>50]  # About 10%
+OTU = colnames(MOUTH.event[,-28265])[sum.events > 50]  # About 10%
 
-MOUTH.otu = MOUTH.otu[,otus50]
-MOUTH.abundance = MOUTH.abundance[,otus50]
-MOUTH.event = MOUTH.event[,otus50]
+MOUTH.otu = MOUTH.otu[,OTU]
+MOUTH.abundance = MOUTH.abundance[,OTU]
+MOUTH.event = MOUTH.event[,OTU]
 
 num.subject = dim(MOUTH.abundance)[1]   # 480
 num.otu = dim(MOUTH.abundance)[2]       # 1131
@@ -73,8 +73,7 @@ num.otu = dim(MOUTH.abundance)[2]       # 1131
 
 ```{r}
 model.coxph = function(abundance.tab, event.tab, meta.tab){
-    num.subject = dim(abundance.tab)[1]
-    num.otu = dim(abundance.tab)[2]
+    
     fit.coxph = matrix(rep(NA, num.otu*3), nrow = num.otu)
     colnames(fit.coxph) = c('Estimates', 'SE', 'p')
     
@@ -94,151 +93,86 @@ fit.coxph = model.coxph(MOUTH.abundance, MOUTH.event, MOUTH.meta)
 # 3. Coxphf
 
 ```{r}
-fit.coxphf = matrix(rep(NA, num.otu*3), nrow = num.otu)
-colnames(fit.coxphf) = c('Estimates', 'SE', 'p')
+model.coxphf = function(abundance.tab, event.tab, meta.tab, pl = TRUE){
     
-for (i in 1:num.otu){
-    data.fit = cbind(MOUTH.abundance[,i], MOUTH.event[,i], MOUTH.meta)
-    colnames(data.fit)[1:2] = c('abundance', 'event')
-    fit = coxphf(Surv(time = abundance, event =  event) ~ Oral_SPF10, data = data.fit)
-    fit.coxphf[i,] = c(fit$coefficients, fit$var^0.5, fit$prob)
+    fit.coxphf = matrix(rep(NA, num.otu*3), nrow = num.otu)
+    colnames(fit.coxphf) = c('Estimates', 'SE', 'p')
+    
+    for (i in 1:num.otu){
+        data.fit = cbind(abundance.tab[,i], event.tab[,i], meta.tab)
+        colnames(data.fit)[1:2] = c('abundance', 'event')
+        fit = coxphf(Surv(time = abundance, event =  event) ~ Oral_SPF10, data = data.fit, pl = pl)
+        fit.coxphf[i,] = c(fit$coefficients, fit$var^0.5, fit$prob)
+    }
+    
+    return(fit.coxphf)
 }
+
+fit.coxphf = model.coxphf(MOUTH.abundance, MOUTH.event, MOUTH.meta)
 ```
 
 # 4. Coxphf Permutation
 
+```{r}
+permutation.coxphf = function(Round){
+    
+    perm.matrix = matrix(nrow = Round, ncol = num.otu)
+    colnames(perm.matrix) = OTU
+    
+    for (i in 1:Round){
+    
+        fit.permuted = rep(NA, num.otu)
+        MOUTH.meta.permuted =  MOUTH.meta
+        MOUTH.meta.permuted$Oral_SPF10 = sample(MOUTH.meta.permuted$Oral_SPF10, num.subject, replace = FALSE)
+    
+        perm.matrix[i,] = model.coxphf(MOUTH.abundance, MOUTH.event, MOUTH.meta.permuted, pl = FALSE)[,1]
+    }
+    
+    return(perm.matrix)
+}
+```
+
 ## 4.1 Timing
 
 ```{r}
-Round = 100
-
-perm.matrix = matrix(nrow = Round, ncol = num.otu)
-colnames(perm.matrix) = colnames(MOUTH.abundance)
-
-time.permute = rep(NA, Round)
-
 t.start = Sys.time()
-
-for (i in 1:Round){
-    
-    fit.permuted = rep(NA, num.otu)
-    fit.time = rep(NA, num.otu)
-    
-    for (j in 1:num.otu){
-        data.fit  = as.data.frame(cbind(MOUTH.abundance[,j],
-                                        MOUTH.event[,j],
-                                        sample(MOUTH.meta$Oral_SPF10, num.subject, replace = FALSE)))
-        colnames(data.fit) = c('abundance', 'event', 'Oral_SPF10')
-        
-        t0.fit = Sys.time()
-        fit = coxphf(Surv(time = abundance, event = event)~Oral_SPF10, pl = FALSE, data = data.fit)
-        t1.fit = Sys.time()
-        
-        fit.permuted[j] = fit$coefficients
-        fit.time[j] = t1.fit - t0.fit
-    }
-    
-    perm.matrix[i,] = fit.permuted
-    time.permute[i] = sum(fit.time)
-}
-
+x = permutation.coxphf(10)
 t.end = Sys.time()
 
 t.end-t.start
-sum(time.permute,na.rm = T)
-
-# Total Time: 221s
-# Fit Time: 209s
 ```
 
 ## 4.2 Permutation
 
 ```{r}
-permutation.coxphf = function(Round = 100){
-    
-    perm.matrix = matrix(nrow = Round, ncol = num.otu)
-    colnames(perm.matrix) = colnames(MOUTH.abundance)
-    
-    for (i in 1:Round){
-    
-        fit.permuted = rep(NA, num.otu)
-        permuted.cov = sample(MOUTH.meta$Oral_SPF10, num.subject, replace = FALSE)
-    
-        for (j in 1:num.otu){
-            data.fit  = as.data.frame(cbind(MOUTH.abundance[,j],
-                                            MOUTH.event[,j],
-                                            permuted.cov))
-            colnames(data.fit) = c('abundance', 'event', 'Oral_SPF10')
-            
-            fit = coxphf(Surv(time = abundance, event = event)~Oral_SPF10, pl = FALSE, data = data.fit)
-            fit.permuted[j] = fit$coefficients
-        }
-    
-    perm.matrix[i,] = fit.permuted
-    }
-    
-    return(perm.matrix)
-}
-
-K = 30
+K = 15
 Round = 1000
+
 for (k in 1:K){
     perm.matrix = permutation.coxphf(Round)
     write.csv(perm.matrix, paste('D:/Default_Working_Directory/Permutations/Permutation_', k, '.csv', sep = ''))
 }
 ```
 
-```{r}
-set.seed(1234)
-onepermute = sample(MOUTH.meta$Oral_SPF10, num.subject, replace = FALSE)
-```
-
 ## 4.3 P Values
 
 ```{r}
 Permutations = as.data.frame(matrix(NA, ncol = num.otu, nrow = 1000*K))
-colnames(Permutations) = otus50
+colnames(Permutations) = OTU
 
 for (k in 1:K){
     Permutations[(1:Round)+(k-1)*Round,] = read.csv(paste('D:/Default_Working_Directory/Permutations/Permutation_', k, '.csv', sep = ''))[,-1] 
 }
+
+hist(colMeans(Permutations))
 ```
 
 ```{r}
-p.perms = rep(NA, num.otu)
-R11 = Permutations[11,]
-Reps = rep(abs(R11), each = 30000-1)
-
-p.perms = colMeans(matrix(Reps, nrow = 30000-1) < as.matrix(abs(Permutations[-11,])))
-
-for (i in 1:num.otu){
-    
-#    p.perm = sum(Permutations[,i] >= Permutations[11,][i])
-#    p.perm = min(p.perm, nrow(Permutations) - p.perm)
-#    p.perm = 2*(p.perm+1)/(nrow(Permutations)+1)
-    
-    p.perms[i] = p.perm
-}
-
-hist(p.perms)
-plot(x=-log((1:num.otu)/num.otu,10),-log(sort(p.perms),10));abline(0,1)
-```
-
-```{r}
-p.perms = rep(NA, num.otu)
-
-for (i in 1:num.otu){
-    
-    p.perm = sum(Permutations[,i] >= fit.coxphf[i,1])
-    p.perm = min(p.perm, nrow(Permutations) - p.perm)
-    p.perm = 2*(p.perm+1)/(nrow(Permutations)+1)
-    
-    p.perms[i] = p.perm
-}
-
-
-#p.perms = colMeans(matrix(Reps, nrow = 30000-1) < as.matrix(abs(Permutations[-11,])))
-p.perms = colMeans(matrix(rep(abs(fit.coxphf[,1]),each = 30000), nrow = 30000)<as.matrix(abs(Permutations)))
+R = nrow(Permutations)
+fit.matrix.coxphf = matrix(rep(fit.coxphf[,1], R), nrow = R, byrow = TRUE)
+count.upper = colSums(fit.matrix.coxphf <= Permutations)
+count.lower = colSums(fit.matrix.coxphf > Permutations)
+p.perms = 2 * (apply(rbind(count.upper, count.lower), 2, min)+1) / (R+1)
 
 hist(p.perms)
 plot(x=-log((1:num.otu)/num.otu,10),-log(sort(p.perms),10));abline(0,1)
@@ -260,8 +194,8 @@ q.perms = p.adjust(p.perms, 'fdr')
 q.coxphf = p.adjust(p.coxphf, 'fdr')
 q.LDM = ldmfit$q.otu.freq[1,]
 
-result.p = data.frame(OTU = otus50, coxphf = p.coxphf, LDM = p.LDM, perm = p.perms)
-result.q = data.frame(OTU = otus50, coxphf = q.coxphf, LDM = q.LDM, perm = q.perms)
+result.p = data.frame(OTU = OTU, coxphf = p.coxphf, LDM = p.LDM, perm = p.perms)
+result.q = data.frame(OTU = OTU, coxphf = q.coxphf, LDM = q.LDM, perm = q.perms)
 
 cutoff = 0.1
 
