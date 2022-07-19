@@ -1,0 +1,228 @@
+---
+title: "MOUTH"
+author: "Shengtao Wang"
+---
+
+```{r setup}
+library(survival)
+library(tidyverse)
+library(LDM)
+library(coxphf)
+```
+
+```{r}
+load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.meta_filtered.rData')
+load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.otu_filtered.rData')
+load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.abundance_filtered.rData')
+load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.event_filtered.rData')
+
+sum.events = colSums(MOUTH.event[,-28265])  # The last column is id
+OTU = colnames(MOUTH.event[,-28265])[sum.events > 50]  # About 10%
+
+#MOUTH.otu = MOUTH.otu[,OTU]
+#MOUTH.abundance = MOUTH.abundance[,OTU]
+#MOUTH.event = MOUTH.event[,OTU]
+
+set.seed(315)
+OTU.100 = sample(OTU, 100)
+
+MOUTH.otu.100 = MOUTH.otu[,OTU.100]
+MOUTH.abundance.100 = MOUTH.abundance[,OTU.100]
+MOUTH.event.100 = MOUTH.event[,OTU.100]
+
+set.seed(224)
+MOUTH.meta$Oral_SPF10.sim50 = rbinom(480, 1, 0.5)
+table(MOUTH.meta$Oral_SPF10) #13% case
+table(MOUTH.meta$Oral_SPF10.sim50) #45% case
+```
+
+# 1. Coxphf
+
+```{r}
+model.coxphf = function(formula, abundance.tab, event.tab, meta.tab){
+    
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+    
+    fit.coxphf = matrix(rep(NA, num.otu*2), nrow = num.otu)
+    colnames(fit.coxphf) = c('beta', 'p')
+    rownames(fit.coxphf) = colnames(abundance.tab)
+    
+    for (i in 1:num.otu){
+        data.fit = cbind(abundance.tab[,i], event.tab[,i], meta.tab)
+        colnames(data.fit)[1:2] = c('abundance', 'event')
+        fit = coxphf(formula, data = data.fit, pl = FALSE)
+        fit.coxphf[i,] = c(fit$coefficients, fit$prob)
+    }
+    
+    return(fit.coxphf)
+}
+
+fit.coxphf.100 = model.coxphf(Surv(time = abundance, event =  event) ~ Oral_SPF10, MOUTH.abundance.100, MOUTH.event.100, MOUTH.meta)
+fit.coxphf.sim50 = model.coxphf(Surv(time = abundance, event =  event) ~ Oral_SPF10.sim50, MOUTH.abundance.100, MOUTH.event.100, MOUTH.meta)
+```
+
+# 2. Coxphf Permutation
+
+```{r}
+permutation.coxphf = function(formula, permute.cov, abundance.tab, event.tab, meta.tab, Round){
+
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+        
+    perm.matrix = matrix(nrow = Round, ncol = num.otu)
+    colnames(perm.matrix) = colnames(abundance.tab)
+    
+    for (i in 1:Round){
+        
+        meta.tab.permuted = meta.tab
+        meta.tab.permuted[,permute.cov] = sample(meta.tab.permuted[,permute.cov], num.subject, replace = FALSE)
+        perm.matrix[i,] = model.coxphf(formula, abundance.tab, event.tab, meta.tab.permuted)[,1]
+    }
+    
+    return(perm.matrix)
+}
+```
+
+## 2.1 Timing
+
+```{r}
+t.start = Sys.time()
+
+x = permutation.coxphf(Surv(time = abundance, event =  event) ~ Oral_SPF10, permute.cov = 'Oral_SPF10',
+                       MOUTH.abundance.100, MOUTH.event.100, MOUTH.meta, Round = 10)
+
+t.end = Sys.time()
+t.end-t.start
+```
+
+## 2.2 Permutation
+
+```{r}
+Round = 1000
+
+Permutations.100 = permutation.coxphf(Surv(time = abundance, event =  event) ~ Oral_SPF10, permute.cov = 'Oral_SPF10',
+                                      MOUTH.abundance.100, MOUTH.event.100, MOUTH.meta, Round)
+#write.csv(Permutations.100, file = 'Permutations_100_10e5.csv')
+```
+
+```{r}
+Permutations.sim50 = permutation.coxphf(Surv(time = abundance, event =  event) ~ Oral_SPF10.sim50, permute.cov = 'Oral_SPF10.sim50',
+                                        MOUTH.abundance.100, MOUTH.event.100, MOUTH.meta, Round)
+#write.csv(Permutations.100, file = 'Permutations_sim50_10e5.csv')
+```
+
+## 2.3 P values
+
+```{r}
+p.permutations = function(fit.estimates, permutation.tab){
+    R = nrow(permutation.tab)
+    fit.matrix = matrix(rep(fit.estimates, R), nrow = R, byrow = TRUE)
+    
+    count.upper = colSums(fit.matrix <= permutation.tab)
+    count.lower = colSums(fit.matrix > permutation.tab)
+    p.perms = 2 * (apply(rbind(count.upper, count.lower), 2, min)+1) / (R+1)
+    
+    return(p.perms)
+}
+
+# Permutations.100x = read.csv('Permutations_100_10e5.csv')[,-1]
+# Permutations.sim50 = read.csv('Permutations_sim50_10e5.csv')[,-1]
+
+p.perms.100 = p.permutations(fit.coxphf.100[,1], Permutations.100)
+p.perms.sim50 = p.permutations(fit.coxphf.sim50[,1], Permutations.sim50)
+```
+
+```{r fig.width = 12, fig.width = 12}
+num.otu = 100
+
+par(mfrow=c(2,2))
+hist(p.perms.100, main = 'Permutations (13% case)')
+plot(x=-log((1:num.otu)/num.otu,10),-log(sort(p.perms.100),10), main = 'Permutations (13% case)');abline(0,1)
+hist(p.perms.sim50, main = 'Permutations (45% case)')
+plot(x=-log((1:num.otu)/num.otu,10),-log(sort(p.perms.sim50),10), main = 'Permutations (45% case)');abline(0,1)
+```
+
+# 3. LDM
+
+```{r}
+fit.LDM.100 = ldm(MOUTH.otu.100~factor(MOUTH.meta$Oral_SPF10))
+fit.LDM.sim50 = ldm(MOUTH.otu.100~factor(MOUTH.meta$Oral_SPF10.sim50))
+```
+
+# 4. Results
+
+```{r}
+get.result = function(fit.coxphf, fit.LDM, p.perms){
+    p.coxphf = fit.coxphf[,2]
+    p.LDM = fit.LDM$p.otu.freq[1,]
+    
+    q.coxphf = p.adjust(p.coxphf, 'fdr')
+    q.LDM = fit.LDM$q.otu.freq[1,]
+    q.perms = p.adjust(p.perms, 'fdr')
+    
+    result = data.frame(OTU = rownames(fit.coxphf), p.coxphf, p.LDM, p.perms, q.coxphf, q.LDM, q.perms)
+}
+
+result.100 = get.result(fit.coxphf.100, fit.LDM.100, p.perms.100)
+result.sim50 = get.result(fit.coxphf.sim50, fit.LDM.sim50, p.perms.sim50)
+
+cutoff = 0.1
+
+table('perm'=(result.100$p.perms < cutoff), 'LDM'=(result.100$p.LDM < cutoff))
+table('perm'=(result.100$q.perms < cutoff), 'LDM'=(result.100$q.LDM < cutoff))
+
+table('perm'=(result.sim50$p.perms < cutoff), 'LDM'=(result.sim50$p.LDM < cutoff))
+table('perm'=(result.sim50$q.perms < cutoff), 'LDM'=(result.sim50$q.LDM < cutoff))
+```
+
+```{r}
+ggplot(result.100) +
+    geom_point(aes(x = p.perms, y = p.LDM), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed') +
+    labs(x = 'Coxphf Permutation', y = 'LDM', title = 'p values')
+```
+
+```{r}
+ggplot(result.100) +
+    geom_point(aes(x = p.perms, y = p.coxphf), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed') +
+    labs(x = 'Coxphf Permutation', y = 'Coxphf', title = 'p values')
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

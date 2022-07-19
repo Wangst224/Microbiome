@@ -1,5 +1,5 @@
 ---
-title: "Tryout"
+title: "MOUTH"
 author: "Shengtao Wang"
 ---
 
@@ -108,24 +108,23 @@ model.coxphf = function(abundance.tab, event.tab, meta.tab, pl = TRUE){
     return(fit.coxphf)
 }
 
-fit.coxphf = model.coxphf(MOUTH.abundance, MOUTH.event, MOUTH.meta)
+fit.coxphf = model.coxphf(MOUTH.abundance, MOUTH.event, MOUTH.meta, pl = FALSE)
 ```
 
 # 4. Coxphf Permutation
 
 ```{r}
-permutation.coxphf = function(Round){
+permutation.coxphf = function(abundance.tab, event.tab, meta.tab, Round){
     
     perm.matrix = matrix(nrow = Round, ncol = num.otu)
     colnames(perm.matrix) = OTU
     
     for (i in 1:Round){
     
-        fit.permuted = rep(NA, num.otu)
-        MOUTH.meta.permuted =  MOUTH.meta
-        MOUTH.meta.permuted$Oral_SPF10 = sample(MOUTH.meta.permuted$Oral_SPF10, num.subject, replace = FALSE)
+        meta.tab.permuted =  meta.tab
+        meta.tab.permuted$Oral_SPF10 = sample(meta.tab.permuted$Oral_SPF10, num.subject, replace = FALSE)
     
-        perm.matrix[i,] = model.coxphf(MOUTH.abundance, MOUTH.event, MOUTH.meta.permuted, pl = FALSE)[,1]
+        perm.matrix[i,] = model.coxphf(abundance.tab, event.tab, meta.tab.permuted, pl = FALSE)[,1]
     }
     
     return(perm.matrix)
@@ -136,7 +135,9 @@ permutation.coxphf = function(Round){
 
 ```{r}
 t.start = Sys.time()
+
 x = permutation.coxphf(10)
+
 t.end = Sys.time()
 
 t.end-t.start
