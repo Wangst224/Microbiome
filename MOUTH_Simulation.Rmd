@@ -1,0 +1,458 @@
+---
+title: "MOUTH Simulation"
+author: "Shengtao Wang"
+---
+
+```{r setup}
+library(survival)
+library(tidyverse)
+library(LDM)
+library(coxphf)
+```
+
+```{r}
+load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.meta_filtered.rData')
+load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.otu_filtered.rData')
+load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.abundance_filtered.rData')
+load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.event_filtered.rData')
+
+sum.events = colSums(MOUTH.event[,-28265])  # The last column is id
+OTU = colnames(MOUTH.event[,-28265])[sum.events > 50]  # About 10%
+
+MOUTH.otu = MOUTH.otu[,OTU]
+MOUTH.abundance = MOUTH.abundance[,OTU]
+MOUTH.event = MOUTH.event[,OTU]
+```
+
+```{r}
+OTU.freq = data.frame(freq = sort(colSums(MOUTH.event)))
+OTU.freq$strata = cut(OTU.freq$freq, seq(48,480,48), 1:9)
+
+set.seed(2250)
+strat.sample = sampling::strata(OTU.freq, stratanames = 'strata', size = rep(5,9), method = 'srswor')$ID_unit
+OTU.freq.sampled = OTU.freq[strat.sample,]
+OTU.freq.sampled$rel.freq.percent = round(OTU.freq.sampled$freq/480*100, 2)
+
+MOUTH.otu.sampled       = MOUTH.otu[,rownames(OTU.freq.sampled)]
+MOUTH.abundance.sampled = MOUTH.abundance[,rownames(OTU.freq.sampled)]
+MOUTH.event.sampled     = MOUTH.event[,rownames(OTU.freq.sampled)]
+```
+
+```{r}
+N = nrow(MOUTH.meta)
+MOUTH.meta$HPV = MOUTH.meta$Oral_SPF10
+
+set.seed(2343)
+MOUTH.meta$HPV.sim20 = sample(rep(c(0, 1), c(N - floor(N*0.2), floor(N*0.2))), replace = FALSE)
+MOUTH.meta$HPV.sim50 = sample(rep(c(0, 1), c(N - floor(N*0.5), floor(N*0.5))), replace = FALSE)
+MOUTH.meta$HPV.sim80 = sample(rep(c(0, 1), c(N - floor(N*0.8), floor(N*0.8))), replace = FALSE)
+
+table(MOUTH.meta$HPV.sim20)
+table(MOUTH.meta$HPV.sim50)
+table(MOUTH.meta$HPV.sim80)
+```
+
+# 1. Coxph & Coxphf
+
+```{r}
+model.coxph = function(formula, abundance.tab, event.tab, meta.tab){
+    
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+    
+    fit.coxph = matrix(rep(NA, num.otu*2), nrow = num.otu)
+    colnames(fit.coxph) = c('beta', 'p')
+    rownames(fit.coxph) = colnames(abundance.tab)
+    
+    for (i in 1:num.otu){
+        data.fit = cbind(abundance.tab[,i], event.tab[,i], meta.tab)
+        colnames(data.fit)[1:2] = c('abundance', 'event')
+        fit = coxph(formula, data = data.fit)
+        fit.coxph[i,] = (summary(fit)$coefficients)[c(1,5)]
+    }
+    
+    return(fit.coxph)
+}
+
+model.coxphf = function(formula, abundance.tab, event.tab, meta.tab){
+    
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+    
+    fit.coxphf = matrix(rep(NA, num.otu*2), nrow = num.otu)
+    colnames(fit.coxphf) = c('beta', 'p')
+    rownames(fit.coxphf) = colnames(abundance.tab)
+    
+    for (i in 1:num.otu){
+        data.fit = cbind(abundance.tab[,i], event.tab[,i], meta.tab)
+        colnames(data.fit)[1:2] = c('abundance', 'event')
+        fit = coxphf(formula, data = data.fit)
+        fit.coxphf[i,] = c(fit$coefficients, fit$prob)
+    }
+    
+    return(fit.coxphf)
+}
+
+fit.coxph = model.coxph(Surv(time = abundance, event =  event) ~ HPV, MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta)
+fit.coxphf = model.coxphf(Surv(time = abundance, event =  event) ~ HPV, MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta)
+```
+
+# 2. Coxph & Coxphf Permutation
+
+```{r}
+permutation.coxph = function(formula, permute.cov, abundance.tab, event.tab, meta.tab, Round){
+
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+        
+    perm.matrix.estimates = matrix(nrow = Round, ncol = num.otu)
+    perm.matrix.p = matrix(nrow = Round, ncol = num.otu)
+    colnames(perm.matrix.estimates) = colnames(abundance.tab)
+    colnames(perm.matrix.p) = colnames(abundance.tab)
+    
+    for (i in 1:Round){
+        
+        meta.tab.permuted = meta.tab
+        meta.tab.permuted[,permute.cov] = sample(meta.tab.permuted[,permute.cov], num.subject, replace = FALSE)
+        model.fit = model.coxph(formula, abundance.tab, event.tab, meta.tab.permuted)
+        perm.matrix.estimates[i,] = model.fit[,1]
+        perm.matrix.p[i,] = model.fit[,2]
+    }
+    
+    return(list(perm.matrix.estimates, perm.matrix.p))
+}
+
+permutation.coxphf = function(formula, permute.cov, abundance.tab, event.tab, meta.tab, Round){
+
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+        
+    perm.matrix.estimates = matrix(nrow = Round, ncol = num.otu)
+    perm.matrix.p = matrix(nrow = Round, ncol = num.otu)
+    colnames(perm.matrix.estimates) = colnames(abundance.tab)
+    colnames(perm.matrix.p) = colnames(abundance.tab)
+    
+    for (i in 1:Round){
+        
+        meta.tab.permuted = meta.tab
+        meta.tab.permuted[,permute.cov] = sample(meta.tab.permuted[,permute.cov], num.subject, replace = FALSE)
+        model.fit = model.coxphf(formula, abundance.tab, event.tab, meta.tab.permuted)
+        perm.matrix.estimates[i,] = model.fit[,1]
+        perm.matrix.p[i,] = model.fit[,2]
+    }
+    
+    return(list(perm.matrix.estimates, perm.matrix.p))
+}
+```
+
+## 2.1 Timing
+
+```{r}
+t.start = Sys.time()
+
+x = permutation.coxph(Surv(time = abundance, event =  event) ~ HPV.sim20, permute.cov = 'HPV.sim20',
+                       MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta, Round = 100)
+
+t.end = Sys.time()
+t.end-t.start
+```
+
+## 2.2 Permutation
+
+```{r}
+Round = 100000
+
+perm.coxph.sim20   = permutation.coxph(Surv(time = abundance, event =  event) ~ HPV.sim20, permute.cov = 'HPV.sim20',
+                                       MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta, Round)
+perm.coxph.sim50   = permutation.coxph(Surv(time = abundance, event =  event) ~ HPV.sim50, permute.cov = 'HPV.sim50',
+                                       MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta, Round)
+perm.coxph.sim80   = permutation.coxph(Surv(time = abundance, event =  event) ~ HPV.sim80, permute.cov = 'HPV.sim80',
+                                       MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta, Round)
+
+save(perm.coxph.sim20, file = 'perm.coxph.sim20.rData')
+save(perm.coxph.sim50, file = 'perm.coxph.sim50.rData')
+save(perm.coxph.sim80, file = 'perm.coxph.sim80.rData')
+
+perm.coxphf.sim20   = permutation.coxphf(Surv(time = abundance, event =  event) ~ HPV.sim20, permute.cov = 'HPV.sim20',
+                                         MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta, Round)
+perm.coxphf.sim50   = permutation.coxphf(Surv(time = abundance, event =  event) ~ HPV.sim50, permute.cov = 'HPV.sim50',
+                                         MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta, Round)
+perm.coxphf.sim80   = permutation.coxphf(Surv(time = abundance, event =  event) ~ HPV.sim80, permute.cov = 'HPV.sim80',
+                                         MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta, Round)
+
+save(perm.coxphf.sim20, file = 'perm.coxphf.sim20.rData')
+save(perm.coxphf.sim50, file = 'perm.coxphf.sim50.rData')
+save(perm.coxphf.sim80, file = 'perm.coxphf.sim80.rData')
+```
+
+```{r}
+load('perm.coxph.sim20.rData')
+load('perm.coxph.sim50.rData')
+load('perm.coxph.sim80.rData')
+load('perm.coxphf.sim20.rData')
+load('perm.coxphf.sim50.rData')
+load('perm.coxphf.sim80.rData')
+
+estimates = list(coxph.sim20 =  perm.coxph.sim20[[1]],
+                 coxph.sim50 =  perm.coxph.sim50[[1]],
+                 coxph.sim80 =  perm.coxph.sim80[[1]],
+                 coxphf.sim20 =  perm.coxphf.sim20[[1]],
+                 coxphf.sim50 =  perm.coxphf.sim50[[1]],
+                 coxphf.sim80 =  perm.coxphf.sim80[[1]])
+
+pvalues = list(coxph.sim20 =  perm.coxph.sim20[[2]],
+               coxph.sim50 =  perm.coxph.sim50[[2]],
+               coxph.sim80 =  perm.coxph.sim80[[2]],
+               coxphf.sim20 =  perm.coxphf.sim20[[2]],
+               coxphf.sim50 =  perm.coxphf.sim50[[2]],
+               coxphf.sim80 =  perm.coxphf.sim80[[2]])
+```
+
+```{r fig.width = 12, fig.width = 12}
+par(mfrow=c(2,3))
+hist(estimates$coxph.sim20, main = 'Coxph: 20% Case')
+hist(estimates$coxph.sim50, main = 'Coxph: 50% Case')
+hist(estimates$coxph.sim80, main = 'Coxph: 80% Case')
+hist(estimates$coxphf.sim20, main = 'Coxphf: 20% Case')
+hist(estimates$coxphf.sim50, main = 'Coxphf: 50% Case')
+hist(estimates$coxphf.sim80, main = 'Coxphf: 80% Case')
+```
+
+```{r fig.width = 12, fig.width = 12}
+sim.model = 'coxph.sim50'
+
+par(mfrow=c(3,3))
+for (i in (1:9)*5-4){
+    hist((estimates[[sim.model]])[,i], main = ceiling(i/5))
+}
+```
+
+```{r fig.width = 12, fig.width = 12}
+par(mfrow=c(2,3))
+hist(pvalues$coxph.sim20, main = 'Coxph: 20% Case')
+hist(pvalues$coxph.sim50, main = 'Coxph: 50% Case')
+hist(pvalues$coxph.sim80, main = 'Coxph: 80% Case')
+hist(pvalues$coxphf.sim20, main = 'Coxphf: 20% Case')
+hist(pvalues$coxphf.sim50, main = 'Coxphf: 50% Case')
+hist(pvalues$coxphf.sim80, main = 'Coxphf: 80% Case')
+```
+
+```{r fig.width = 12, fig.width = 12}
+sim.model = 'coxphf.sim20'
+
+par(mfrow=c(3,3))
+for (i in (1:9)*5-4){
+    hist((pvalues[[sim.model]])[,i], main = ceiling(i/5))
+}
+```
+
+```{r fig.width = 12, fig.width = 12}
+sim.model = 'coxph.sim20'
+N = 100000
+
+par(mfrow=c(3,3))
+for (i in (1:9)*5-4){
+    plot(-log10(sort((pvalues[[sim.model]])[,i])), -log10((1:N)/N), main = ceiling(i/5));abline(0,1)
+}
+```
+
+## 2.3 Bias and MSE
+
+```{r}
+bias = list(coxph.sim20 = colMeans(estimates$coxph.sim20),
+            coxph.sim50 = colMeans(estimates$coxph.sim50),
+            coxph.sim80 = colMeans(estimates$coxph.sim80),
+            coxphf.sim20 = colMeans(estimates$coxphf.sim20),
+            coxphf.sim50 = colMeans(estimates$coxphf.sim50),
+            coxphf.sim80 = colMeans(estimates$coxphf.sim80))
+
+MSE = list(coxph.sim20 = colMeans(estimates$coxph.sim20^2),
+            coxph.sim50 = colMeans(estimates$coxph.sim50^2),
+            coxph.sim80 = colMeans(estimates$coxph.sim80^2),
+            coxphf.sim20 = colMeans(estimates$coxphf.sim20^2),
+            coxphf.sim50 = colMeans(estimates$coxphf.sim50^2),
+            coxphf.sim80 = colMeans(estimates$coxphf.sim80^2))
+```
+
+```{r fig.width = 12, fig.width = 12}
+par(mfrow=c(2,3))
+hist(bias$coxph.sim20, main = 'Coxph: 20% Case')
+hist(bias$coxph.sim50, main = 'Coxph: 50% Case')
+hist(bias$coxph.sim80, main = 'Coxph: 80% Case')
+hist(bias$coxphf.sim20, main = 'Coxphf: 20% Case')
+hist(bias$coxphf.sim50, main = 'Coxphf: 50% Case')
+hist(bias$coxphf.sim80, main = 'Coxphf: 80% Case')
+```
+
+```{r fig.width = 12, fig.width = 12}
+par(mfrow=c(2,3))
+hist(MSE$coxph.sim20, main = 'Coxph: 20% Case')
+hist(MSE$coxph.sim50, main = 'Coxph: 50% Case')
+hist(MSE$coxph.sim80, main = 'Coxph: 80% Case')
+hist(MSE$coxphf.sim20, main = 'Coxphf: 20% Case')
+hist(MSE$coxphf.sim50, main = 'Coxphf: 50% Case')
+hist(MSE$coxphf.sim80, main = 'Coxphf: 80% Case')
+```
+
+## 2.4 Permutation p values
+
+```{r}
+p.permutation.fit = function(fit.estimates, permutation.tab){
+    R = nrow(permutation.tab)
+    fit.matrix = matrix(rep(fit.estimates, R), nrow = R, byrow = TRUE)
+    
+    count.upper = colSums(fit.matrix <= permutation.tab)
+    count.lower = colSums(fit.matrix > permutation.tab)
+    p = 2 * (apply(rbind(count.upper, count.lower), 2, min)+1) / (R+1)
+    
+    return(p)
+}
+
+p.permutation = function(permutation.tab, max.R = Inf){
+    R = min(c(nrow(permutation.tab), max.R))
+    p.matrix = matrix(nrow = R, ncol = ncol(permutation.tab))
+    colnames(p.matrix) = colnames(permutation.tab)
+    
+    for (i in 1:R){
+        p.matrix[i,] = p.permutation.fit(permutation.tab[i,], permutation.tab[-i,])
+    }
+    
+    return(p.matrix)
+}
+
+pvalues.perm = list(coxph.sim20 = p.permutation(estimates$coxph.sim20, max.R = 1000),
+                    coxph.sim50 = p.permutation(estimates$coxph.sim50, max.R = 1000),
+                    coxph.sim80 = p.permutation(estimates$coxph.sim80, max.R = 1000),
+                    coxphf.sim20 = p.permutation(estimates$coxphf.sim20, max.R = 1000),
+                    coxphf.sim50 = p.permutation(estimates$coxphf.sim50, max.R = 1000),
+                    coxphf.sim80 = p.permutation(estimates$coxphf.sim80, max.R = 1000))
+
+save(pvalues.perm, file = 'pvalues.perm.rData')
+load('pvalues.perm.rData')
+```
+
+```{r fig.width = 12, fig.width = 12}
+par(mfrow=c(2,3))
+hist(pvalues.perm$coxph.sim20, main = 'Coxph: 20% Case')
+hist(pvalues.perm$coxph.sim50, main = 'Coxph: 50% Case')
+hist(pvalues.perm$coxph.sim80, main = 'Coxph: 80% Case')
+hist(pvalues.perm$coxphf.sim20, main = 'Coxphf: 20% Case')
+hist(pvalues.perm$coxphf.sim50, main = 'Coxphf: 50% Case')
+hist(pvalues.perm$coxphf.sim80, main = 'Coxphf: 80% Case')
+```
+
+```{r fig.width = 12, fig.width = 12}
+sim.model = 'coxphf.sim20'
+
+par(mfrow=c(3,3))
+for (i in (1:9)*5-4){
+    hist((pvalues.perm[[sim.model]])[,i], main = ceiling(i/5))
+}
+```
+
+```{r fig.width = 12, fig.width = 12}
+N = length(pvalues.perm$coxph.sim20)
+
+par(mfrow=c(2,3))
+plot(-log10(sort(pvalues.perm$coxph.sim20)), -log10((1:N)/N), main = 'Coxph: 20% Case');abline(0,1)
+plot(-log10(sort(pvalues.perm$coxph.sim50)), -log10((1:N)/N), main = 'Coxph: 50% Case');abline(0,1)
+plot(-log10(sort(pvalues.perm$coxph.sim80)), -log10((1:N)/N), main = 'Coxph: 80% Case');abline(0,1)
+plot(-log10(sort(pvalues.perm$coxphf.sim20)), -log10((1:N)/N), main = 'Coxphf: 20% Case');abline(0,1)
+plot(-log10(sort(pvalues.perm$coxphf.sim50)), -log10((1:N)/N), main = 'Coxphf: 50% Case');abline(0,1)
+plot(-log10(sort(pvalues.perm$coxphf.sim80)), -log10((1:N)/N), main = 'Coxphf: 80% Case');abline(0,1)
+```
+
+```{r fig.width = 12, fig.width = 12}
+sim.model = 'coxphf.sim20'
+N = 1000
+
+par(mfrow=c(3,3))
+for (i in (1:9)*5-4){
+    plot(-log10(sort((pvalues.perm[[sim.model]])[,i])), -log10((1:N)/N), main = ceiling(i/5));abline(0,1)
+}
+```
+
+# 3. LDM
+
+```{r}
+fit.LDM.sim20 = ldm(MOUTH.otu.sampled~factor(MOUTH.meta$HPV.sim20))
+fit.LDM.sim50 = ldm(MOUTH.otu.sampled~factor(MOUTH.meta$HPV.sim50))
+fit.LDM.sim80 = ldm(MOUTH.otu.sampled~factor(MOUTH.meta$HPV.sim80))
+```
+
+# 4. Results
+
+```{r}
+get.result = function(fit.coxphf, fit.LDM, p.perms){
+    p.coxphf = fit.coxphf[,2]
+    p.LDM = fit.LDM$p.otu.freq[1,]
+    
+    q.coxphf = p.adjust(p.coxphf, 'fdr')
+    q.LDM = fit.LDM$q.otu.freq[1,]
+    q.perms = p.adjust(p.perms, 'fdr')
+    
+    result = data.frame(OTU = rownames(fit.coxphf), p.coxphf, p.LDM, p.perms, q.coxphf, q.LDM, q.perms)
+}
+
+result.100 = get.result(fit.coxphf.100, fit.LDM.100, p.perms.100)
+result.sim50 = get.result(fit.coxphf.sim50, fit.LDM.sim50, p.perms.sim50)
+
+cutoff = 0.1
+
+table('perm'=(result.100$p.perms < cutoff), 'LDM'=(result.100$p.LDM < cutoff))
+table('perm'=(result.100$q.perms < cutoff), 'LDM'=(result.100$q.LDM < cutoff))
+
+table('perm'=(result.sim50$p.perms < cutoff), 'LDM'=(result.sim50$p.LDM < cutoff))
+table('perm'=(result.sim50$q.perms < cutoff), 'LDM'=(result.sim50$q.LDM < cutoff))
+```
+
+```{r}
+ggplot(result.100) +
+    geom_point(aes(x = p.perms, y = p.LDM), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed') +
+    labs(x = 'Coxphf Permutation', y = 'LDM', title = 'p values')
+```
+
+```{r}
+ggplot(result.100) +
+    geom_point(aes(x = p.perms, y = p.coxphf), size = 1) +
+    geom_abline(slope = 1, intercept = 0, lwd = 1, color = 'red', linetype = 'dashed') +
+    labs(x = 'Coxphf Permutation', y = 'Coxphf', title = 'p values')
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
