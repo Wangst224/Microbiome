@@ -1,0 +1,281 @@
+---
+title: "MOUTH Simulation: Partial Null"
+author: "Shengtao Wang"
+---
+
+```{r setup}
+library(survival)
+library(tidyverse)
+library(LDM)
+library(coxphf)
+```
+
+```{r}
+load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.meta_filtered.rData')
+load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.otu_filtered.rData')
+load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.abundance_filtered.rData')
+load('D:/Default_Working_Directory/Data/MOUTH/MOUTH.event_filtered.rData')
+
+sum.events = colSums(MOUTH.event[,-28265])  # The last column is id
+OTU = colnames(MOUTH.event[,-28265])[sum.events > 50]  # About 10%
+
+MOUTH.otu = MOUTH.otu[,OTU]
+MOUTH.abundance = MOUTH.abundance[,OTU]
+MOUTH.event = MOUTH.event[,OTU]
+```
+
+```{r}
+OTU.freq = data.frame(freq = sort(colSums(MOUTH.event)))
+OTU.freq$strata = cut(OTU.freq$freq, seq(48,480,48), 1:9)
+
+set.seed(2250)
+strat.sample = sampling::strata(OTU.freq, stratanames = 'strata', size = rep(2,9), method = 'srswor')$ID_unit
+OTU.freq.sampled = OTU.freq[strat.sample,]
+OTU.freq.sampled$rel.freq.percent = round(OTU.freq.sampled$freq/480*100, 2)
+
+sample.OTU = row.names(OTU.freq.sampled)[c(seq(1, 17, 2), seq(2, 18, 2))]
+OTU.freq.sampled = OTU.freq.sampled[sample.OTU,]
+
+MOUTH.otu.sampled       = MOUTH.otu[,sample.OTU]
+MOUTH.abundance.sampled = MOUTH.abundance[,sample.OTU]
+MOUTH.event.sampled     = MOUTH.event[,sample.OTU]
+```
+
+# 1. Coxph & Coxphf
+
+```{r}
+model.coxph = function(formula, abundance.tab, event.tab, meta.tab){
+    
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+    
+    fit.coxph = matrix(rep(NA, num.otu*2), nrow = num.otu)
+    colnames(fit.coxph) = c('beta', 'p')
+    rownames(fit.coxph) = colnames(abundance.tab)
+    
+    for (i in 1:num.otu){
+        data.fit = cbind(abundance.tab[,i], event.tab[,i], meta.tab)
+        colnames(data.fit)[1:2] = c('abundance', 'event')
+        fit = coxph(formula, data = data.fit)
+        fit.coxph[i,] = (summary(fit)$coefficients)[1,c(1,5)]
+    }
+    
+    return(fit.coxph)
+}
+
+model.coxphf = function(formula, abundance.tab, event.tab, meta.tab){
+    
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+    
+    fit.coxphf = matrix(rep(NA, num.otu*2), nrow = num.otu)
+    colnames(fit.coxphf) = c('beta', 'p')
+    rownames(fit.coxphf) = colnames(abundance.tab)
+    
+    for (i in 1:num.otu){
+        data.fit = cbind(abundance.tab[,i], event.tab[,i], meta.tab)
+        colnames(data.fit)[1:2] = c('abundance', 'event')
+        fit = coxphf(formula, data = data.fit)
+        fit.coxphf[i,] = c(fit$coefficients[1], fit$prob[1])
+    }
+    
+    return(fit.coxphf)
+}
+```
+
+# 2. Coxph & Coxphf Simulation
+
+```{r}
+simulation.coxph = function(formula, abundance.tab, event.tab, meta.tab, Beta, Round){
+    
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+        
+    simulation.matrix.estimates = matrix(nrow = Round, ncol = num.otu)
+    simulation.matrix.p = matrix(nrow = Round, ncol = num.otu)
+    colnames(simulation.matrix.estimates) = colnames(abundance.tab)
+    colnames(simulation.matrix.p) = colnames(abundance.tab)
+    
+    for (i in 1:Round){
+        
+        X1 = rbinom(num.subject, 1, 0.5)
+        X2 = scaled.sum + rnorm(num.subject)
+        logit = 0.5 * scale(X1 + X2) + Beta * scaled.sum
+        prob = exp(logit) / (exp(logit) + 1)
+        
+        meta.tab$X1 = X1
+        meta.tab$X2 = X2
+        meta.tab$sim.outcome = rbinom(num.subject, 1, prob)
+        model.fit = model.coxph(formula, abundance.tab, event.tab, meta.tab)
+        simulation.matrix.estimates[i,] = model.fit[,1]
+        simulation.matrix.p[i,] = model.fit[,2]
+    }
+    
+    return(list(simulation.matrix.estimates, simulation.matrix.p))
+}
+
+simulation.coxphf = function(formula, abundance.tab, event.tab, meta.tab, Beta, Round){
+    
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+        
+    simulation.matrix.estimates = matrix(nrow = Round, ncol = num.otu)
+    simulation.matrix.p = matrix(nrow = Round, ncol = num.otu)
+    colnames(simulation.matrix.estimates) = colnames(abundance.tab)
+    colnames(simulation.matrix.p) = colnames(abundance.tab)
+    
+    for (i in 1:Round){
+        
+        X1 = rbinom(num.subject, 1, 0.5)
+        X2 = scaled.sum + rnorm(num.subject)
+        logit = 0.5 * scale(X1 + X2) + Beta * scaled.sum
+        prob = exp(logit) / (exp(logit) + 1)
+        
+        meta.tab$X1 = X1
+        meta.tab$X2 = X2
+        meta.tab$sim.outcome = rbinom(num.subject, 1, prob)
+        model.fit = model.coxphf(formula, abundance.tab, event.tab, meta.tab)
+        simulation.matrix.estimates[i,] = model.fit[,1]
+        simulation.matrix.p[i,] = model.fit[,2]
+    }
+    
+    return(list(simulation.matrix.estimates, simulation.matrix.p))
+}
+```
+
+## 2.1 Timing
+
+```{r}
+t.start = Sys.time()
+
+x = simulation.coxph(Surv(time = abundance, event =  event) ~ sim.outcome+X1+X2,
+                     MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta,
+                     Beta = 1, Round = 1000)
+
+t.end = Sys.time()
+t.end-t.start
+```
+
+## 2.2 Simulation
+
+```{r}
+Round = 100000
+scaled.sum = scale(rowSums(MOUTH.otu.sampled[,1:9]))
+
+sim.coxph.beta0.unadj = simulation.coxph(Surv(time = abundance, event =  event) ~ sim.outcome,
+                                            MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta,
+                                            Beta = 0, Round)
+sim.coxph.beta0.adj = simulation.coxph(Surv(time = abundance, event =  event) ~ sim.outcome+X1+X2,
+                                          MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta,
+                                          Beta = 0, Round)
+sim.coxph.beta1.unadj = simulation.coxph(Surv(time = abundance, event =  event) ~ sim.outcome,
+                                            MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta,
+                                            Beta = 1, Round)
+sim.coxph.beta1.adj = simulation.coxph(Surv(time = abundance, event =  event) ~ sim.outcome+X1+X2,
+                                          MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta,
+                                          Beta = 1, Round)
+
+save(sim.coxph.beta0.unadj, file = 'sim.coxph.beta0.unadj.rData')
+save(sim.coxph.beta0.adj, file = 'sim.coxph.beta0.adj.rData')
+save(sim.coxph.beta1.unadj, file = 'sim.coxph.beta1.unadj.rData')
+save(sim.coxph.beta1.adj, file = 'sim.coxph.beta1.adj.rData')
+
+```
+
+```{r}
+Round = 100000
+
+sim.coxphf.beta0.unadj = simulation.coxphf(Surv(time = abundance, event =  event) ~ sim.outcome,
+                                            MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta,
+                                            Beta = 0, Round)
+sim.coxphf.beta0.adj = simulation.coxphf(Surv(time = abundance, event =  event) ~ sim.outcome+X1+X2,
+                                          MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta,
+                                          Beta = 0, Round)
+sim.coxphf.beta1.unadj = simulation.coxphf(Surv(time = abundance, event =  event) ~ sim.outcome,
+                                            MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta,
+                                            Beta = 1, Round)
+sim.coxphf.beta1.adj = simulation.coxphf(Surv(time = abundance, event =  event) ~ sim.outcome+X1+X2,
+                                          MOUTH.abundance.sampled, MOUTH.event.sampled, MOUTH.meta,
+                                          Beta = 1, Round)
+
+save(sim.coxphf.beta0.unadj, file = 'sim.coxphf.beta0.unadj.rData')
+save(sim.coxphf.beta0.adj, file = 'sim.coxphf.beta0.adj.rData')
+save(sim.coxphf.beta1.unadj, file = 'sim.coxphf.beta1.unadj.rData')
+save(sim.coxphf.beta1.adj, file = 'sim.coxphf.beta1.adj.rData')
+```
+
+```{r}
+load('Simulation/sim.coxph.beta0.unadj.rData')
+load('Simulation/sim.coxph.beta0.adj.rData')
+load('Simulation/sim.coxph.beta1.unadj.rData')
+load('Simulation/sim.coxph.beta1.adj.rData')
+load('Simulation/sim.coxphf.beta0.unadj.rData')
+load('Simulation/sim.coxphf.beta0.adj.rData')
+load('Simulation/sim.coxphf.beta1.unadj.rData')
+load('Simulation/sim.coxphf.beta1.adj.rData')
+```
+
+```{r fig.height= 12, fig.width = 12}
+par(mfcol=c(9,4))
+for (i in 1:18){
+    hist(sim.coxph.beta0.unadj[[1]][,i], main = paste('Unadjusted', i)); abline(v = 0, col = 'red', lwd = 2)
+}
+for (i in 1:18){
+    hist(sim.coxph.beta0.adj[[1]][,i], main = paste('Adjusted', i)); abline(v = 0, col = 'red', lwd = 2)
+}
+```
+
+```{r fig.height= 12, fig.width = 12}
+par(mfcol=c(9,4))
+for (i in 1:18){
+    hist(sim.coxphf.beta0.unadj[[2]][,i], main = paste('Unadjusted', i))
+}
+for (i in 1:18){
+    hist(sim.coxphf.beta0.adj[[2]][,i], main = paste('Adjusted', i))
+}
+```
+
+```{r fig.height= 24, fig.width = 12}
+par(mfcol=c(9,4))
+for (i in 1:18){
+    qqplot(-log10(sim.coxph.beta0.unadj[[2]][,i]), -log10((1:Round)/Round), main = paste('Unadjusted', i)); abline(a = 0, b = 1, col = 'red', lwd = 2)
+}
+for (i in 1:18){
+    qqplot(-log10(sim.coxph.beta0.adj[[2]][,i]), -log10((1:Round)/Round), main = paste('Adjusted', i)); abline(a = 0, b = 1, col = 'red', lwd = 2)
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
