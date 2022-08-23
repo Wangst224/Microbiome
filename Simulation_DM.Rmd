@@ -1,0 +1,279 @@
+---
+title: "Simulation_DM"
+author: "Shengtao Wang"
+---
+
+```{r setup}
+library(survival)
+library(tidyverse)
+library(LDM)
+library(coxphf)
+library(dirmult)
+```
+
+```{r}
+load('DirMultOutput.RData')
+
+set.seed(1608)
+num.otu = 50
+num.subject = 100
+
+prob.est = sample(dd$pi, num.otu, replace = FALSE)
+prob.est = prob.est/sum(prob.est)   # Rescale
+theta = dd$theta
+gamma.plus = (1 - theta) / theta
+
+OTU = list()
+OTU$all = names(prob.est)
+OTU$U = sample(OTU$all, floor(num.otu/2), replace = FALSE)
+OTU$C = sample(OTU$all, floor(num.otu/2), replace = FALSE)
+
+OTU$both = intersect(OTU$U, OTU$C)  # 13
+OTU$U.only = setdiff(OTU$U, OTU$C)  # 12
+OTU$C.only = setdiff(OTU$C, OTU$U)  # 12
+OTU$null = setdiff(OTU$all, union(OTU$U, OTU$C))    # 13
+```
+
+```{r}
+simulate.meta.tab = function(num.subject){
+    meta.tab = data.frame(U = rep(NA, num.subject))
+    meta.tab$U = sample(rep(0:1, c(floor(num.subject/2), num.subject - floor(num.subject/2))),
+                        num.subject, replace = FALSE)
+    meta.tab$C = 0.5 * meta.tab$U + runif(num.subject)
+    
+    return(meta.tab)
+}
+
+get.pi = function(beta.U, beta.C, prob, meta.tab, OTU){
+    pi.1 = prob
+    pi.2 = pi.1
+    pi.3 = pi.1
+    
+    pi.2[OTU$U] = sample(pi.2[OTU$U], length(OTU$U), replace = FALSE)
+    pi.3[OTU$C] = sample(pi.3[OTU$C], length(OTU$C), replace = FALSE)
+    
+    p.U = beta.U * meta.tab$U
+    p.C = beta.C * meta.tab$C
+    p = 1 - p.U - p.C
+    
+    pi = p %*% t(pi.1) + p.U %*% t(pi.2) + p.C %*% t(pi.3)
+    colnames(pi) = OTU$all
+    
+    return(pi)
+}
+
+simulation.OTU.tab = function(num.otu, num.subject, param.dirichlet.tab){
+    OTU.tab = matrix(ncol = num.otu, nrow = num.subject)
+    colnames(OTU.tab) = colnames(param.dirichlet.tab)
+    
+    for (i in 1:num.subject){
+        N = rnbinom(1, size = 25, mu = 1000)
+        prob = rdirichlet(n = 1, alpha = param.dirichlet.tab[i,])
+        OTU.tab[i,] = rmultinom(1, N, prob)
+    }
+    
+    return(OTU.tab)
+}
+
+otu_2_abundance = function(otu.table){
+    # Input an OTU table with columns being OTUs.
+    lib.size = rowSums(otu.table)
+    
+    event = as.data.frame(otu.table > 0)*1  # 0 -> below detection limit -> "censored/alive" -> event = 0 (FALSE)
+    abundance = -log((otu.table + !event)/lib.size)
+    
+    colnames(event) = colnames(otu.table)
+    colnames(abundance) = colnames(otu.table)
+    
+    return(list(event = event, abundance = abundance))
+}
+```
+
+```{r}
+model.coxph = function(formula, abundance.tab, event.tab, meta.tab){
+    
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+    
+    fit.coxph = matrix(rep(NA, num.otu*4), nrow = num.otu)
+    colnames(fit.coxph) = c('beta.U', 'beta.C', 'p.U', 'p.C')
+    rownames(fit.coxph) = colnames(abundance.tab)
+    
+    for (i in 1:num.otu){
+        data.fit = cbind(abundance.tab[,i], event.tab[,i], meta.tab)
+        colnames(data.fit)[1:2] = c('abundance', 'event')
+        fit = coxph(formula, data = data.fit, robust = TRUE)
+        fit.coxph[i,] = c((summary(fit)$coefficients)[1:2,1], (summary(fit)$coefficients)[1:2, 6])
+    }
+    
+    return(fit.coxph)
+}
+
+model.coxphf = function(formula, abundance.tab, event.tab, meta.tab){
+    
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+    
+    fit.coxphf = matrix(rep(NA, num.otu*4), nrow = num.otu)
+    colnames(fit.coxphf) = c('beta.U', 'beta.C', 'p.U', 'p.C')
+    rownames(fit.coxphf) = colnames(abundance.tab)    
+
+    for (i in 1:num.otu){
+        data.fit = cbind(abundance.tab[,i], event.tab[,i], meta.tab)
+        colnames(data.fit)[1:2] = c('abundance', 'event')
+        coeff.coxphf = coxphf(formula, data = data.fit)$coefficients    #Coefficients from coxphf
+        fit = coxph(formula, data = data.fit, robust = TRUE, init = coeff.coxphf, iter.max = 0)
+        
+        fit.coxphf[i,] = c((summary(fit)$coefficients)[1:2,1], (summary(fit)$coefficients)[1:2, 6])
+    }    
+        
+    return(fit.coxphf)
+}
+```
+
+```{r}
+Simulation = function(formula, beta.U, beta.C, Round){
+    
+    sim.result = list()
+    sim.result$coxph.beta.U = matrix(ncol = num.otu, nrow = Round)
+    sim.result$coxph.beta.C = matrix(ncol = num.otu, nrow = Round)
+    sim.result$coxph.p.U = matrix(ncol = num.otu, nrow = Round)
+    sim.result$coxph.p.C = matrix(ncol = num.otu, nrow = Round)
+    sim.result$coxphf.beta.U = matrix(ncol = num.otu, nrow = Round)
+    sim.result$coxphf.beta.C = matrix(ncol = num.otu, nrow = Round)
+    sim.result$coxphf.p.U = matrix(ncol = num.otu, nrow = Round)
+    sim.result$coxphf.p.C = matrix(ncol = num.otu, nrow = Round)
+    
+    colnames(sim.result$coxph.beta.U) = names(prob.est)
+    colnames(sim.result$coxph.beta.C) = names(prob.est)
+    colnames(sim.result$coxph.p.U) = names(prob.est)
+    colnames(sim.result$coxph.p.C) = names(prob.est)
+    colnames(sim.result$coxphf.beta.U) = names(prob.est)
+    colnames(sim.result$coxphf.beta.C) = names(prob.est)
+    colnames(sim.result$coxphf.p.U) = names(prob.est)
+    colnames(sim.result$coxphf.p.C) = names(prob.est)
+    
+    for (i in 1:Round){
+        meta.tab = simulate.meta.tab(num.subject)
+        pi = get.pi(beta.U, beta.C, prob = prob.est, meta.tab, OTU)
+        OTU.tab = simulation.OTU.tab(num.otu, num.subject, pi*gamma.plus)
+        event.tab = otu_2_abundance(OTU.tab)$event
+        abundance.tab = otu_2_abundance(OTU.tab)$abundance
+        
+        fit.coxph = model.coxph(formula, abundance.tab, event.tab, meta.tab)
+        fit.coxphf = model.coxphf(formula, abundance.tab, event.tab, meta.tab)
+        
+        sim.result$coxph.beta.U[i,] = fit.coxph[,'beta.U']
+        sim.result$coxph.beta.C[i,] = fit.coxph[,'beta.C']
+        sim.result$coxph.p.U[i,] = fit.coxph[,'p.U']
+        sim.result$coxph.p.C[i,] = fit.coxph[,'p.C']
+        sim.result$coxphf.beta.U[i,] = fit.coxphf[,'beta.U']
+        sim.result$coxphf.beta.C[i,] = fit.coxphf[,'beta.C']
+        sim.result$coxphf.p.U[i,] = fit.coxphf[,'p.U']
+        sim.result$coxphf.p.C[i,] = fit.coxphf[,'p.C']
+    }
+    
+    return(sim.result)
+    
+}
+```
+
+```{r warning=FALSE}
+Round = 100
+formula = Surv(time = abundance, event = event) ~ U + C
+
+t.start = Sys.time()
+
+x = Simulation(formula, beta.U = 0.2, beta.C = 0.3, Round)
+y = Simulation(formula, beta.U = 0, beta.C = 0.3, Round)
+
+t.end = Sys.time()
+t.end-t.start
+```
+
+```{r warning=FALSE}
+Round = 1
+
+sim.0 = Simulation(formula, beta.U = 0, beta.C = 0.3, Round)
+sim.1 = Simulation(formula, beta.U = 0.2, beta.C = 0.3, Round)
+
+save(sim.0, file = 'Sim_beta_0.rData')
+save(sim.1, file = 'Sim_beta_0.2.rData')
+```
+
+```{r}
+load('Sim_beta_0.rData')
+load('Sim_beta_0.2.rData')
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
