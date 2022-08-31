@@ -1,5 +1,5 @@
 ---
-title: "Simulation_DM"
+title: "Simulation_DM_Permutation"
 author: "Shengtao Wang"
 ---
 
@@ -96,15 +96,15 @@ model.coxph = function(formula, abundance.tab, event.tab, meta.tab){
     num.otu = ncol(abundance.tab)
     num.subject = nrow(abundance.tab)
     
-    fit.coxph = matrix(rep(NA, num.otu*4), nrow = num.otu)
-    colnames(fit.coxph) = c('beta.U', 'beta.C', 'p.U', 'p.C')
+    fit.coxph = matrix(rep(NA, num.otu*2), nrow = num.otu)
+    colnames(fit.coxph) = c('beta.U', 'p.U')
     rownames(fit.coxph) = colnames(abundance.tab)
     
     for (i in 1:num.otu){
         data.fit = cbind(abundance.tab[,i], event.tab[,i], meta.tab)
         colnames(data.fit)[1:2] = c('abundance', 'event')
         fit = coxph(formula, data = data.fit, robust = TRUE)
-        fit.coxph[i,] = c((summary(fit)$coefficients)[1:2,1], (summary(fit)$coefficients)[1:2, 6])
+        fit.coxph[i,] = c((summary(fit)$coefficients)[1,1], (summary(fit)$coefficients)[1, 6])
     }
     
     return(fit.coxph)
@@ -115,8 +115,8 @@ model.coxphf = function(formula, abundance.tab, event.tab, meta.tab){
     num.otu = ncol(abundance.tab)
     num.subject = nrow(abundance.tab)
     
-    fit.coxphf = matrix(rep(NA, num.otu*4), nrow = num.otu)
-    colnames(fit.coxphf) = c('beta.U', 'beta.C', 'p.U', 'p.C')
+    fit.coxphf = matrix(rep(NA, num.otu*2), nrow = num.otu)
+    colnames(fit.coxphf) = c('beta.U', 'p.U')
     rownames(fit.coxphf) = colnames(abundance.tab)    
 
     for (i in 1:num.otu){
@@ -125,10 +125,56 @@ model.coxphf = function(formula, abundance.tab, event.tab, meta.tab){
         coeff.coxphf = coxphf(formula, data = data.fit)$coefficients    #Coefficients from coxphf
         fit = coxph(formula, data = data.fit, robust = TRUE, init = coeff.coxphf, iter.max = 0)
         
-        fit.coxphf[i,] = c((summary(fit)$coefficients)[1:2,1], (summary(fit)$coefficients)[1:2, 6])
+        fit.coxphf[i,] = c((summary(fit)$coefficients)[1,1], (summary(fit)$coefficients)[1, 6])
     }    
         
     return(fit.coxphf)
+}
+```
+
+```{r}
+permutation.coxph = function(formula, permute.cov, abundance.tab, event.tab, meta.tab, Round){
+
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+        
+    perm.matrix.estimates = matrix(nrow = Round, ncol = num.otu)
+    perm.matrix.p = matrix(nrow = Round, ncol = num.otu)
+    colnames(perm.matrix.estimates) = colnames(abundance.tab)
+    colnames(perm.matrix.p) = colnames(abundance.tab)
+    
+    for (i in 1:Round){
+        
+        meta.tab.permuted = meta.tab
+        meta.tab.permuted[,permute.cov] = sample(meta.tab.permuted[,permute.cov], num.subject, replace = FALSE)
+        model.fit = model.coxph(formula, abundance.tab, event.tab, meta.tab.permuted)
+        perm.matrix.estimates[i,] = model.fit[,1]
+        perm.matrix.p[i,] = model.fit[,2]
+    }
+    
+    return(list(estimates = perm.matrix.estimates, p = perm.matrix.p))
+}
+
+permutation.coxphf = function(formula, permute.cov, abundance.tab, event.tab, meta.tab, Round){
+
+    num.otu = ncol(abundance.tab)
+    num.subject = nrow(abundance.tab)
+        
+    perm.matrix.estimates = matrix(nrow = Round, ncol = num.otu)
+    perm.matrix.p = matrix(nrow = Round, ncol = num.otu)
+    colnames(perm.matrix.estimates) = colnames(abundance.tab)
+    colnames(perm.matrix.p) = colnames(abundance.tab)
+    
+    for (i in 1:Round){
+        
+        meta.tab.permuted = meta.tab
+        meta.tab.permuted[,permute.cov] = sample(meta.tab.permuted[,permute.cov], num.subject, replace = FALSE)
+        model.fit = model.coxphf(formula, abundance.tab, event.tab, meta.tab.permuted)
+        perm.matrix.estimates[i,] = model.fit[,1]
+        perm.matrix.p[i,] = model.fit[,2]
+    }
+    
+    return(list(estimates = perm.matrix.estimates, p = perm.matrix.p))
 }
 ```
 
@@ -180,75 +226,51 @@ Simulation = function(formula, beta.U, beta.C, Round){
 ```
 
 ```{r warning=FALSE}
-Round = 100
-formula = Surv(time = abundance, event = event) ~ U + C
+Simulation_Permutation = function(formula, beta.U, beta.C, Perm.Round){
+    
+    result = list()
+    
+    meta.tab = simulate.meta.tab(num.subject)
+    pi = get.pi(beta.U, beta.C, prob = prob.est, meta.tab, OTU)
+    OTU.tab = simulation.OTU.tab(num.otu, num.subject, pi*gamma.plus)
+    event.tab = otu_2_abundance(OTU.tab)$event
+    abundance.tab = otu_2_abundance(OTU.tab)$abundance
 
-t.start = Sys.time()
-
-x = Simulation(formula, beta.U = 0.2, beta.C = 0.3, Round)
-y = Simulation(formula, beta.U = 0, beta.C = 0.3, Round)
-
-t.end = Sys.time()
-t.end-t.start
+    fit.coxph = model.coxph(formula, abundance.tab, event.tab, meta.tab)
+    fit.coxphf = model.coxphf(formula, abundance.tab, event.tab, meta.tab)    
+    
+    permute.cov = 'U'
+    perm.coxph = permutation.coxph(formula, permute.cov, abundance.tab, event.tab, meta.tab, Perm.Round)
+    perm.coxphf = permutation.coxphf(formula, permute.cov, abundance.tab, event.tab, meta.tab, Perm.Round)
+    
+    result$coxph = fit.coxph
+    result$coxphf = fit.coxphf
+    result$coxph.perm = perm.coxph$estimates
+    result$coxphf.perm = perm.coxphf$estimates
+    
+    return(result)
+    
+}
 ```
 
 ```{r warning=FALSE}
-Round = 500
+Perm.Round = 1000
+formula = Surv(time = abundance, event =  event) ~ U
 
-sim.0 = Simulation(formula, beta.U = 0, beta.C = 0, Round)
-sim.1 = Simulation(formula, beta.U = 0.2, beta.C = 0.3, Round)
-
-#save(sim.0, file = 'Sim_beta_0.rData')
-#save(sim.1, file = 'Sim_beta_0.2.rData')
+start.time = Sys.time()
+r = Simulation_Permutation(formula, beta.U = 0.2, beta.C = 0, Perm.Round)
+Sys.time() - start.time
 ```
 
-```{r}
-load('Sim_beta_0.rData')
-load('Sim_beta_0.2.rData')
-```
+```{r warning=FALSE}
+Perm.Round = 10000
+formula = Surv(time = abundance, event =  event) ~ U
 
-```{r}
-Alpha = list()
-Alpha$U.sim.0.coxph = colMeans(sim.0[['coxph.p.U']][,OTU$U] < 0.05)
-Alpha$xU.sim.0.coxph = colMeans(sim.0[['coxph.p.U']][,OTU$not.U] < 0.05)
-Alpha$U.sim.1.coxph = colMeans(sim.1[['coxph.p.U']][,OTU$U] < 0.05)
-Alpha$xU.sim.1.coxph = colMeans(sim.1[['coxph.p.U']][,OTU$not.U] < 0.05)
-Alpha$U.sim.0.coxphf = colMeans(sim.0[['coxphf.p.U']][,OTU$U] < 0.05)
-Alpha$xU.sim.0.coxphf = colMeans(sim.0[['coxphf.p.U']][,OTU$not.U] < 0.05)
-Alpha$U.sim.1.coxphf = colMeans(sim.1[['coxphf.p.U']][,OTU$U] < 0.05)
-Alpha$xU.sim.1.coxphf = colMeans(sim.1[['coxphf.p.U']][,OTU$not.U] < 0.05)
-
-Alpha
-```
-
-```{r}
-beta.U = 0.2
-beta.C = 0.3
-
-meta.tab = simulate.meta.tab(num.subject)
-pi = get.pi(beta.U, beta.C, prob = prob.est, meta.tab, OTU)
-OTU.tab = simulation.OTU.tab(num.otu, num.subject, pi*gamma.plus)
-event.tab = otu_2_abundance(OTU.tab)$event
-abundance.tab = otu_2_abundance(OTU.tab)$abundance
-
-colMeans(OTU.tab/rowSums(OTU.tab))
-```
-
-```{r fig.width = 12, fig.height = 12}
-par(mfrow = c(5,5))
-for (i in 1:25){
-    hist(sim.1[['coxph.p.U']][,OTU$U][,i], main = '', xlab = '')
+for (i in 1:30){
+    result = Simulation_Permutation(formula, beta.U = 0.2, beta.C = 0, Perm.Round)
+    save(result, file = paste('./DM_Permutation/DM_Permutation_', i, '.rData', sep = ''))
 }
 ```
-
-```{r fig.width = 12, fig.height = 12}
-par(mfrow = c(5,5))
-for (i in 1:25){
-    hist(sim.1[['coxph.beta.U']][,OTU$U][,i], main = '', xlab = '')
-}
-```
-
-
 
 
 
